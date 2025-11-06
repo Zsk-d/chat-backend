@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Socket.IO Test</title>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: "Segoe UI", sans-serif;
+            background: #f6f7f9;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        #chat-box {
+            width: 500px;
+            height: 400px;
+            border: 1px solid #ccc;
+            border-radius: 10px;
+            background: white;
+            padding: 10px;
+            overflow-y: auto;
+            margin-bottom: 10px;
+        }
+
+        .msg {
+            margin: 5px 0;
+            padding: 5px 10px;
+            border-radius: 8px;
+        }
+
+        .me {
+            background: #d1ffd6;
+            text-align: right;
+        }
+
+        .other {
+            background: #e7e7e7;
+            text-align: left;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>💬 Socket.IO Test</h2>
+    <div id="chat-box"></div>
+
+    <div style="display: flex;flex-direction: column;">
+        <div>
+            <label for="token">TOKEN：</label>
+            <input id="token" style="width: 400px; margin-bottom: 5px;" />
+        </div>
+        <div>
+            <label for="receiverId">接收者 ID列表：</label>
+            <input id="receiverId" style="width: 400px; margin-bottom: 5px;" />
+        </div>
+        <div>
+            <label for="conversationId">会话 ID：</label>
+            <input id="conversationId" style="width: 400px; margin-bottom: 5px;" />
+        </div>
+        <div>
+            <label for="message">消息: </label>
+            <input id="message" style="width: 400px; margin-bottom: 5px;" />
+        </div>
+        <button id="connect">连接</button>
+        <button id="disconnect">断开</button>
+        <button id="sendBtn">发送</button>
+        <button id="getConversations">获取会话列表</button>
+        <button id="newConversation">新会话</button>
+        <button id="getLatestMsg">获取最近消息</button>
+        <button id="getUnReadMsgList">获取会话未读消息</button>
+        <button id="joinConversation">加入会话</button>
+    </div>
+
+    <script>
+        let connected = false;
+        let socket = null
+        let userId = null;
+        // === 配置 ===
+        const SERVER_URL = "http://192.168.2.24:5000";
+
+
+        const chatBox = document.getElementById("chat-box");
+        const messageInput = document.getElementById("message");
+        const receiverInput = document.getElementById("receiverId");
+        const conversationInput = document.getElementById("conversationId");
+        const tokenInput = document.getElementById("token");
+        const getConversationsBtn = document.getElementById("getConversations");
+        const newConversationBtn = document.getElementById("newConversation");
+        const connectBtn = document.getElementById("connect");
+        const sendBtn = document.getElementById("sendBtn");
+        const getUnReadMsgList = document.getElementById("getUnReadMsgList");
+        const getLatestMsg = document.getElementById("getLatestMsg");
+        const joinConversation = document.getElementById("joinConversation");
+
+        // 加载已经存在的token
+        const TOKEN = sessionStorage.getItem("TOKEN");
+        if (TOKEN) {
+            tokenInput.value = TOKEN;
+        }
+
+        // 发送消息按钮
+        sendBtn.onclick = () => {
+            const content = messageInput.value.trim();
+            const receiverId = receiverInput.value.trim();
+            const conversationId = conversationInput.value.trim();
+
+            if (!content || !conversationId) {
+                alert("请填写 Conversation ID 和消息内容！");
+                return;
+            }
+
+            socket.emit("send_message", { conversationId, content });
+            messageInput.value = "";
+        };
+
+        getConversationsBtn.onclick = () => {
+            socket.emit("get_conversations");
+        };
+
+        getUnReadMsgList.onclick = () => {
+            const conversationId = conversationInput.value.trim();
+            socket.emit("get_unread_msg_list", { conversationId });
+        };
+
+        newConversationBtn.onclick = () => {
+            socket.emit("create_conversation", { receiverIds: receiverInput.value.trim().split(",") });
+        };
+
+        getLatestMsg.onclick = () => {
+            const conversationId = conversationInput.value.trim();
+            socket.emit("get_latest_msg", { conversationId });
+        };
+
+        joinConversation.onclick = () => {
+            const conversationId = conversationInput.value.trim();
+            socket.emit("join_conversation", { conversationId });
+        };
+
+        connectBtn.onclick = () => {
+            let TOKEN = tokenInput.value.trim();
+            // 保存token
+            sessionStorage.setItem("TOKEN", TOKEN);
+            if (!TOKEN) {
+                alert("请填写你的 JWT token！");
+                return;
+            }
+
+            // === 建立连接 ===
+            socket = io(SERVER_URL, {
+                auth: { token: TOKEN }
+            });
+
+            socket.on("connect", () => {
+                logSystem(`✅ 已连接到服务器`);
+                connected = true;
+            });
+
+            socket.on("disconnect", () => {
+                logSystem("❌ 已断开连接");
+                connected = false;
+            });
+
+            socket.on("get_conversations_res", (msg) => {
+                addMessage(`会话列表 ${JSON.stringify(msg)}`, "other")
+            });
+
+            // 接收消息
+            socket.on("receive_message", (msg) => {
+                addMessage(`💬 [${msg.senderId}]: ${msg.content}`, "other");
+            });
+
+            // 自己发送确认
+            socket.on("message_sent", (msg) => {
+                addMessage(`我: ${msg.content}`, "me");
+            });
+
+            // 在线状态广播
+            socket.on("user_online", (data) => {
+                let { userId, online } = data
+                logSystem(`🟢 用户${online ? '上线' : '下线'}: ${userId}`);
+            });
+
+            socket.on("create_conversation_res", (data) => {
+                logSystem(`新会话: ${JSON.stringify(data)}`, "other")
+            });
+
+            socket.on("join_conversation_res", (res) => {
+                let { ok, data, msg } = res
+                if (!ok) {
+                    logSystem("加入会话失败: " + msg)
+                    return
+                }
+                let { conversationId, participants } = data
+                logSystem(`加入会话: ${conversationId}, 现有用户: ${participants}`)
+            });
+
+            socket.on("connect_res", (res) => {
+                let { ok, data, msg } = res
+                if (!ok) {
+                    alert("登录失败: " + msg)
+                    return
+                }
+
+                logSystem(`已登录账号: ${data.userId}`);
+                userId = data.userId
+            });
+
+            socket.on("get_latest_msg_res", (res) => {
+                let { ok, data, msg } = res
+                if (!ok) {
+                    logSystem("获取最新消息失败: " + msg)
+                    return
+                }
+                let { messages, pagination } = data
+                if (messages && messages.length > 0) {
+                    messages.forEach(msg => {
+                        addMessage(`💬 [${msg.senderId._id}]: ${msg.content}`, msg.senderId._id == userId ? "me" : "other");
+                    })
+                }
+            });
+
+            socket.on("get_unread_msg_list_res", (res) => {
+                let { ok, data, msg } = res
+                if (!ok) {
+                    logSystem("获取未读消息失败: " + msg)
+                    return
+                }
+
+                let msgs = data
+                if (msgs && msgs.length > 0) {
+                    msgs.forEach(msg => {
+                        addMessage(`💬 [${msg.senderId}]: ${msg.content}`, "other");
+                    })
+                }
+            });
+
+        };
+
+        document.getElementById("disconnect").onclick = () => {
+            if (!connected) {
+                alert("请先连接服务器！");
+                return;
+            }
+
+            socket.disconnect();
+        };
+
+        // === 工具函数 ===
+        function addMessage(text, type = "other") {
+            const div = document.createElement("div");
+            div.className = `msg ${type}`;
+            div.innerText = text;
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function logSystem(msg) {
+            const div = document.createElement("div");
+            div.style.color = "#888";
+            div.style.fontSize = "12px";
+            div.innerText = msg;
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+    </script>
+</body>
+
+</html>
