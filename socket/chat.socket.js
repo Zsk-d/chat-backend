@@ -278,8 +278,8 @@ const onUserGetConversations = (socket) => {
         let cList = await msgService.getUserConversationList(userId);
         // 整理消息数据
         cList = cList.map(item => {
-            let { _id, name, type, createdAt, lastMessageAt, lastMessage } = item
-            return { _id, name, type, createdAt, lastMessageAt, lastMessage }
+            let { _id, name, type, createdAt, lastMessageAt, lastMessage, participants } = item
+            return { _id, name, type, createdAt, lastMessageAt, lastMessage, participants }
         })
         socket.emit("get_conversations_res", cList);
     });

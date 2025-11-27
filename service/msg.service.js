@@ -7,8 +7,14 @@ import { Message, Conversation, User } from "../models/index.js";
  */
 const getUserConversationList = async (userId) => {
     return await Conversation.find({ participants: { $in: [userId] } })
-        .populate('participants')
-        .populate('lastMessage');
+        .populate('participants', 'username uid')
+        .populate({
+            path: 'lastMessage',
+            populate: {
+                path: 'senderId',
+                select: 'username'
+            }
+        });
 };
 
 /**
@@ -96,6 +102,7 @@ const sendMessageToConversation = async (conversationId, senderId, messageData) 
     });
 
     const savedMessage = await message.save();
+    await savedMessage.populate('senderId', 'username')
 
     // 更新会话的最后消息信息
     conversation.lastMessage = savedMessage._id;
