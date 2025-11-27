@@ -5,6 +5,7 @@ import { getLogger } from '../utils/logger.js'
 
 import msgService from "../service/msg.service.js";
 import userService from "../service/user.service.js";
+import { create } from "domain";
 
 const logger = getLogger();
 
@@ -52,9 +53,12 @@ const initConnection = () => {
 
         onUserGetConversations(socket)
         onGetUnReadMessages(socket)
+        onCreateConversation(socket);
         onUserSendMessage(socket);
         onUserGetLatestMsg(socket)
         onJoinConversation(socket)
+        onLeaveConversation(socket)
+        onGetMsgByTime(socket)
         // 断开连接
         onUserDisconnect(socket);
 
@@ -129,16 +133,40 @@ const onJoinConversation = (socket) => {
         let { conversationId } = data
         // 获取会话中其他用户ID
         try {
-            let { joinMessage, participants } = await msgService.joinConversation(conversationId, userId)
+            let { participants } = await msgService.joinConversation(conversationId, userId)
             // 通知群成员
-            await emitConversationMessage(joinMessage, conversationId)
-            socket.emit("join_conversation_res", { ok: true, data: { conversationId, participants } });
+            await emitUserConversationEvent('join_conversation_res', conversationId, { ok: true, data: { conversationId, participants } })
 
         } catch (error) {
             socket.emit("join_conversation_res", { ok: false, msg: error.message });
         }
     })
 }
+
+// 用户离开会话
+const onLeaveConversation = (socket) => {
+    const userId = socket.user.id;
+    socket.on("leave_conversation", async (data) => {
+        let { conversationId } = data
+        // 获取会话中其他用户ID
+        try {
+            let { conversationDeleted, latestUserIds } = await msgService.leaveConversation(conversationId, userId)
+            if (conversationDeleted) {
+                // 通知群成员 会话解散
+                await emitConversationDeletedMessage(conversationId, latestUserIds)
+            } else {
+                let data = { ok: true, data: { conversationId, userId } }
+                // 通知群成员 有人离开会话
+                await emitUserConversationEvent('leave_conversation_res', conversationId, data)
+                // 告诉他自己
+                socket.emit("leave_conversation_res", { ok: true, data });
+            }
+        } catch (error) {
+            socket.emit("leave_conversation_res", { ok: false, msg: error.message });
+        }
+    })
+}
+// 传递用户消息
 const emitConversationMessage = async (message, conversationId) => {
     // 更新会话最后消息
     let conversation = await Conversation.findById(conversationId);
@@ -149,15 +177,47 @@ const emitConversationMessage = async (message, conversationId) => {
         receiverIds.forEach(receiverUserId => {
             let receiverSocketId = onlineUsers.get(receiverUserId.toString());
             if (receiverSocketId) {
-                io.to(receiverSocketId).emit("receive_message", message)
+                io.to(receiverSocketId).emit("receive_message", { ok: true, data: { message, conversationId } })
                 // 设置用户已读
                 msgService.markMessageAsRead(message._id, receiverUserId)
             }
         })
     }
 }
-// 用户发送消息事件监听
-const onUserSendMessage = (socket) => {
+/**
+ * 给用户发送会话被删除的事件
+ * @param {*} conversationId 
+ * @param {*} latestUserIds 
+ */
+const emitConversationDeletedMessage = async (conversationId, latestUserIds) => {
+    latestUserIds.forEach(item => {
+        let receiverSocketId = onlineUsers.get(item.toString());
+        io.to(receiverSocketId).emit("conversation_deleted_res", conversationId)
+    })
+}
+/**
+ * 向会话中所有在线用户发送事件
+ * @param {*} eventName 
+ * @param {*} conversationId 
+ * @param {*} data 
+ * @param {*} exclude 排除用户
+ */
+const emitUserConversationEvent = async (eventName, conversationId, data, exclude) => {
+    let conversation = await Conversation.findById(conversationId);
+
+    // 获取会话中所有用户ID, 发送给接收者（如果在线）
+    const receiverIds = conversation.participants.filter(id => !exclude || id.toString() !== exclude);
+    if (receiverIds && receiverIds.length > 0) {
+        receiverIds.forEach(receiverUserId => {
+            let receiverSocketId = onlineUsers.get(receiverUserId.toString());
+            if (receiverSocketId) {
+                io.to(receiverSocketId).emit(eventName, data)
+            }
+        })
+    }
+}
+// 创建会话
+const onCreateConversation = (socket) => {
     const userId = socket.user.id;
 
     socket.on("create_conversation", async (data) => {
@@ -165,11 +225,15 @@ const onUserSendMessage = (socket) => {
         const conversation = await msgService.createConversation(userId, receiverIds)
         if (conversation) {
             let { _id, name, type } = conversation
-            socket.emit("create_conversation_res", { ok: true, data: { _id, name, type } });
+            await emitUserConversationEvent('create_conversation_res', _id, { ok: true, data: { _id, name, type } })
         } else {
             socket.emit("create_conversation_res", { ok: false, msg: "chat.error.create_conversation" });
         }
     });
+}
+// 用户发送消息事件监听
+const onUserSendMessage = (socket) => {
+    const userId = socket.user.id;
 
     // 📩 监听发送消息事件
     socket.on("send_message", async (data) => {
@@ -196,7 +260,7 @@ const onUserSendMessage = (socket) => {
             await emitConversationMessage(message, conversationId)
 
             // 同步给发送者（更新自己界面）
-            socket.emit("message_sent", message);
+            socket.emit("message_sent", { ok: true, data: { message, conversationId } });
         } catch (err) {
             console.error("❌ send_message error:", err);
         }
@@ -214,8 +278,8 @@ const onUserGetConversations = (socket) => {
         let cList = await msgService.getUserConversationList(userId);
         // 整理消息数据
         cList = cList.map(item => {
-            let { _id, name, type } = item
-            return { _id, name, type }
+            let { _id, name, type, createdAt, lastMessageAt, lastMessage } = item
+            return { _id, name, type, createdAt, lastMessageAt, lastMessage }
         })
         socket.emit("get_conversations_res", cList);
     });
@@ -232,6 +296,19 @@ const onGetUnReadMessages = async (socket) => {
             socket.emit("get_unread_msg_list_res", { ok: true, data: msgList });
         } catch (error) {
             socket.emit("get_unread_msg_list_res", { ok: false, msg: 'chat.error.get_unread_msg_list' });
+        }
+    });
+}
+const onGetMsgByTime = async (socket) => {
+    const userId = socket.user.id;
+    socket.on("get_msg_by_time", async (data) => {
+        let { conversationId, time } = data
+        let queryTime = new Date(time)
+        try {
+            let msgList = await msgService.getMsgByTime(conversationId, userId, queryTime);
+            socket.emit("get_msg_by_time_res", { ok: true, data: { messages: msgList, conversationId } });
+        } catch (error) {
+            socket.emit("get_msg_by_time_res", { ok: false, msg: 'chat.error.get_msg_list' });
         }
     });
 }

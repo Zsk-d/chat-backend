@@ -224,7 +224,7 @@ const leaveConversation = async (conversationId, userId) => {
     if (!conversation) {
         throw new Error('会话不存在');
     }
-
+    let users = conversation.participants.map(participantId => participantId.toString());
     // 从参与者列表中移除用户
     conversation.participants = conversation.participants.filter(
         participant => participant.toString() !== userId.toString()
@@ -237,12 +237,10 @@ const leaveConversation = async (conversationId, userId) => {
 
         // 删除会话
         await Conversation.findByIdAndDelete(conversationId);
-
         return {
-            success: true,
-            message: '会话已删除',
-            conversationDeleted: true
-        };
+            conversationDeleted: true,
+            latestUserIds: users
+        }
     } else {
         // 保存更新后的会话
         await conversation.save();
@@ -250,17 +248,17 @@ const leaveConversation = async (conversationId, userId) => {
         // 如果退出的是当前用户，则创建系统消息通知其他参与者
         const systemMessage = new Message({
             conversationId: conversation._id,
+            isDeleted: false,
             senderId: userId,
             type: 'system',
-            content: '用户已离开会话'
+            content: 'chat.system.userLeft'
         });
         await systemMessage.save();
 
         return {
-            success: true,
-            message: '已成功离开会话',
             conversationDeleted: false,
-            updatedConversation: conversation
+            msg: systemMessage,
+            latestUserIds: users
         };
     }
 };
@@ -295,23 +293,23 @@ const joinConversation = async (conversationId, userId) => {
     conversation.participants.push(userId);
 
     // 创建系统消息通知其他参与者
-    const systemMessage = new Message({
-        conversationId: conversation._id,
-        senderId: userId,
-        type: 'system',
-        content: '用户加入了会话'
-    });
-    await systemMessage.save();
+    // const systemMessage = new Message({
+    //     conversationId: conversation._id,
+    //     senderId: userId,
+    //     type: 'system',
+    //     content: '用户加入了会话'
+    // });
+    // await systemMessage.save();
 
     // 更新会话的最后消息信息
-    conversation.lastMessage = systemMessage._id;
-    conversation.lastMessageAt = new Date();
+    // conversation.lastMessage = systemMessage._id;
+    // conversation.lastMessageAt = new Date();
     await conversation.save();
 
     return {
-        joinMessage: systemMessage,
+        // joinMessage: systemMessage,
         // 最新的参与者列表
-        participants: await conversation.populate('participants')
+        participants: (await conversation.populate('participants')).participants.map(item => item._id)
     };
 };
 
@@ -424,7 +422,37 @@ const getUnReadMessages = async (conversationId, userId) => {
 
     return unreadMessages;
 }
+// 通过最晚消息时间, 获取N条以前的消息
+const getMsgByTime = async (conversationId, userId, time, msgNum = 20) => {
+    // 验证会话是否存在
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+        throw new Error('会话不存在');
+    }
 
+    // 检查用户是否在会话中
+    const isParticipant = conversation.participants.some(
+        participant => participant.toString() === userId.toString()
+    );
+
+    if (!isParticipant) {
+        throw new Error('用户不在会话中');
+    }
+
+    // 获取用户的消息
+    const messages = await Message.find({
+        conversationId,
+        createdAt: { $lt: time },
+        deleted: false
+    }).sort({ createdAt: -1 }).limit(msgNum).populate('senderId', 'username')
+
+    // 同时更新用户的已读状态
+    for (const message of messages) {
+        message.readBy.set(userId, true);
+        await message.save();
+    }
+    return messages
+}
 
 export default {
     getUserConversationList,
@@ -441,4 +469,5 @@ export default {
     deleteConversationMessages,
     deleteAllMessages,
     getUnReadMessages,
+    getMsgByTime,
 };

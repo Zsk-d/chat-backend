@@ -5,7 +5,26 @@ export const getUser = async (req, res) => {
     const { uid, name } = req.query;
     let tokenRes = await userService.getUserToken(uid, name)
 
-    res.json(tokenRes);
+    console.log(`获取TOKEN uid:${uid} name:${name}`);
+
+    res.json({ ok: true, data: tokenRes.token });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+export const getUserCid = async (req, res) => {
+  try {
+    const { uid } = req.query;
+    let user = await userService.getUserByUid(uid)
+
+    console.log(`获取cid uid:${uid}`);
+    if (user) {
+      res.json({ ok: true, data: user._id });
+    } else {
+      res.json({ ok: false, msg: 'chat.error.userNotExist' });
+    }
+
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
