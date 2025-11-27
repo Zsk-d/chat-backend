@@ -281,6 +281,13 @@ const onUserGetConversations = (socket) => {
             let { _id, name, type, createdAt, lastMessageAt, lastMessage, participants } = item
             return { _id, name, type, createdAt, lastMessageAt, lastMessage, participants }
         })
+        // 设定用户登录状态
+        cList.forEach(c => {
+            let users = c.participants.filter(item => item.toString() !== userId.toString())
+            users.forEach(u => {
+                u.online = onlineUsers.has(u._id.toString())
+            })
+        })
         socket.emit("get_conversations_res", cList);
     });
 }
