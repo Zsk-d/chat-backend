@@ -15,13 +15,25 @@ const conversationSchema = new mongoose.Schema({
   participants: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
   // 最后一条消息的msgid
   lastMessage: { type: mongoose.Schema.Types.ObjectId, ref: "Message" },
-  unreadCount: { 
-    type: Map, 
-    of: Number, 
+  unreadCount: {
+    type: Map,
+    of: Number,
     default: {}  // 保存每个用户的未读消息数
   },
   // 最后一条消息的时间
   lastMessageAt: { type: Date, default: Date.now }
 }, { timestamps: true });
+
+// 索引
+// 根据参与者查会话列表（通常会话列表页）
+// conversationSchema.index(
+//   { participants: 1, lastMessageAt: -1 }
+// );
+
+// 如果用 updatedAt 排序而不是 lastMessageAt，可以改成：
+conversationSchema.index(
+  { participants: 1, updatedAt: -1 }
+);
+
 
 export default mongoose.model("Conversation", conversationSchema);

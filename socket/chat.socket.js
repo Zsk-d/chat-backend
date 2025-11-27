@@ -328,6 +328,16 @@ export const initSocket = (server) => {
 
 export const getOnlineUserIds = () => Array.from(onlineUsers.keys());
 
+export const getOnlineNum = () => onlineUsers.size;
+
+export const closeUser = (userId) => {
+    let sId = onlineUsers.get(userId)
+    onlineUsers.delete(userId)
+    // 中断链接
+    io.to(sId).disconnectSockets()
+}
+
+
 
 // ================= test ===================
 // import connectDB from "../config/db.js";

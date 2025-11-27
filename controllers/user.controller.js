@@ -1,13 +1,12 @@
 import { User } from "../models/index.js";
-import { getOnlineUserIds } from "../socket/chat.socket.js"; // 从 socket.js 导出在线用户 Map
+import { getOnlineUserIds, getOnlineNum } from "../socket/chat.socket.js"; // 从 socket.js 导出在线用户 Map
 
 /**
- * 获取所有用户（排除自己）
+ * 获取所有用户
  */
 export const getAllUsers = async (req, res) => {
   try {
-    const users = await User.find({ _id: { $ne: req.user.id } })
-      .select("-passwordHash");
+    const users = await User.find();
     res.json(users);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -36,7 +35,6 @@ export const searchUsers = async (req, res) => {
     const regex = new RegExp(keyword, "i");
     const users = await User.find({
       $and: [
-        { _id: { $ne: req.user.id } },
         { $or: [{ username: regex }, { email: regex }] }
       ]
     }).select("-passwordHash");
@@ -52,8 +50,9 @@ export const searchUsers = async (req, res) => {
 export const getOnlineUsers = async (req, res) => {
   try {
     const onlineIds = getOnlineUserIds();
-    const users = await User.find({ _id: { $in: onlineIds } }).select("username email");
-    res.json(users);
+    let onlineNUm = getOnlineNum()
+    // const users = await User.find({ _id: { $in: onlineIds } }).select("username uid");
+    res.json(onlineIds);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

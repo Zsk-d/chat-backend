@@ -16,12 +16,22 @@ const messageSchema = new mongoose.Schema({
   type: { type: String, enum: ["text", "image", "file", "system"], default: "text" },
   content: String,
   status: { type: String, enum: ["sent", "delivered", "read"], default: "sent" },
-  readBy: { 
-    type: Map, 
-    of: Boolean, 
+  readBy: {
+    type: Map,
+    of: Boolean,
     default: {} // 保存每个用户的已读状态
   },
   deleted: { type: Boolean, default: false },
 }, { timestamps: true });
+
+// 索引
+messageSchema.index(
+  { conversationId: 1, deleted: 1, createdAt: -1 }
+);
+
+// 如果后面有按发送者查TA发过的消息，可加：
+messageSchema.index(
+  { senderId: 1, createdAt: -1 }
+);
 
 export default mongoose.model("Message", messageSchema);
