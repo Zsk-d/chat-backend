@@ -6,7 +6,7 @@ const userSchema = new mongoose.Schema({
   uid: { type: Number, unique: true },
   role: { type: String, enum: ["user", "admin"], default: "user" },
   online: { type: Boolean, default: false },
-  lastSeen: { type: Date, default: Date.now },
+  lastSeen: { type: Date, default: Date.now() },
 }, { timestamps: true });
 
 export default mongoose.model("User", userSchema);

@@ -81,6 +81,9 @@ const userOffline = async (userId) => {
     // 通知下线
     let conversations = await msgService.getUserConversationList(userId)
     notiUserConnect(conversations, userId, false)
+
+    // 保存用户最新的在线时间
+    await User.updateOne({ _id: userId }, { lastSeen: Date.now() })
 }
 
 // 通知这些会话中除了上线者之外的在线用户, 该用户上线了
