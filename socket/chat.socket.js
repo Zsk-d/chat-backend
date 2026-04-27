@@ -59,6 +59,7 @@ const initConnection = () => {
         onJoinConversation(socket)
         onLeaveConversation(socket)
         onGetMsgByTime(socket)
+        onConversationMsgRead(socket)
         // 断开连接
         onUserDisconnect(socket);
 
@@ -241,7 +242,7 @@ const onUserSendMessage = (socket) => {
     // 📩 监听发送消息事件
     socket.on("send_message", async (data) => {
         try {
-            const { conversationId, content } = data;
+            const { conversationId, content, type } = data;
 
             // 开始区分新会话和旧会话
             let conversation = null
@@ -257,7 +258,7 @@ const onUserSendMessage = (socket) => {
                 return;
             }
             // 保存消息到数据库
-            const message = await msgService.sendMessageToConversation(conversationId, userId, { content })
+            const message = await msgService.sendMessageToConversation(conversationId, userId, { content, type })
 
             // 处理消息通信
             await emitConversationMessage(message, conversationId)
@@ -281,8 +282,8 @@ const onUserGetConversations = (socket) => {
         let cList = await msgService.getUserConversationList(userId);
         // 整理消息数据
         cList = cList.map(item => {
-            let { _id, name, type, createdAt, lastMessageAt, lastMessage, participants } = item
-            return { _id, name, type, createdAt, lastMessageAt, lastMessage, participants }
+            let { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread } = item
+            return { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread }
         })
         // 设定用户登录状态
         cList.forEach(c => {
@@ -309,6 +310,7 @@ const onGetUnReadMessages = async (socket) => {
         }
     });
 }
+
 const onGetMsgByTime = async (socket) => {
     const userId = socket.user.id;
     socket.on("get_msg_by_time", async (data) => {
@@ -318,10 +320,29 @@ const onGetMsgByTime = async (socket) => {
             let msgList = await msgService.getMsgByTime(conversationId, userId, queryTime);
             socket.emit("get_msg_by_time_res", { ok: true, data: { messages: msgList, conversationId } });
         } catch (error) {
-            socket.emit("get_msg_by_time_res", { ok: false, msg: 'chat.error.get_msg_list' });
+            socket.emit("get_msg_by_time_res", { ok: false, msg: 'chat.error.getMsgListError' });
         }
     });
 }
+
+const onConversationMsgRead = async (socket) => {
+    const userId = socket.user.id;
+
+    socket.on("conversation_msg_read", async (data) => {
+        let { conversationId } = data
+
+        try {
+            let msgList = await msgService.markConMsgReadByConIdAndUid(conversationId, userId);
+            // 通知该频道下的其他人, 某人已经读取了所有消息
+            emitUserConversationEvent('conversation_msg_read_res', conversationId, { ok: true, data: { conversationId, uid: userId } }, userId)
+            // socket.emit("get_msg_by_time_res", { ok: true, data: { messages: msgList, conversationId } });
+        } catch (error) {
+            // socket.emit("get_msg_by_time_res", { ok: false, msg: 'chat.error.getMsgListError' });
+        }
+    });
+}
+
+
 
 export const initSocket = (server) => {
     initIo(server)

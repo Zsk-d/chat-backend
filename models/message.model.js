@@ -21,6 +21,7 @@ const messageSchema = new mongoose.Schema({
     of: Boolean,
     default: {} // 保存每个用户的已读状态
   },
+  readByUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
   deleted: { type: Boolean, default: false },
 }, { timestamps: true });
 
@@ -28,6 +29,8 @@ const messageSchema = new mongoose.Schema({
 messageSchema.index(
   { conversationId: 1, deleted: 1, createdAt: -1 }
 );
+
+messageSchema.index({ conversationId: 1, readByUserIds: 1 });
 
 // 如果后面有按发送者查TA发过的消息，可加：
 messageSchema.index(

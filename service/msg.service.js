@@ -6,7 +6,7 @@ import { Message, Conversation, User } from "../models/index.js";
  * @returns {Promise<Array>} 会话列表
  */
 const getUserConversationList = async (userId) => {
-    return await Conversation.find({ participants: { $in: [userId] } })
+    let res = await Conversation.find({ participants: { $in: [userId] } })
         .populate('participants', 'username uid')
         .populate({
             path: 'lastMessage',
@@ -15,6 +15,32 @@ const getUserConversationList = async (userId) => {
                 select: 'username'
             }
         });
+
+    // 设定有没有未读消息
+    // 查询会话中是否有未读的消息
+    // 数量
+    const conversationsWithUnread = await Promise.all(res.map(async (conversation) => {
+        const conversationId = conversation._id;
+
+        const unreadCount = await Message.countDocuments({
+            conversationId: conversationId,
+            readByUserIds: { $ne: userId }
+        });
+
+        const hasUnread = await Message.exists({
+            conversationId: conversationId,
+            readByUserIds: { $ne: userId }
+        });
+
+        // 转换为普通对象并添加未读信息
+        const conversationObj = conversation.toObject();
+        conversationObj.hasUnread = !!hasUnread;
+        conversationObj.unreadCount = unreadCount;
+
+        return conversationObj;
+    }));
+
+    return conversationsWithUnread;
 };
 
 /**
@@ -84,13 +110,17 @@ const sendMessageToConversation = async (conversationId, senderId, messageData) 
 
     // 初始化readBy对象，为所有参与者设置未读状态（发送者除外）
     const readBy = {};
+    const readByUserIds = []
     conversation.participants.forEach(participantId => {
         // 发送者默认为已读
         if (senderId && participantId.toString() === senderId.toString()) {
             readBy[participantId.toString()] = true;
-        } else {
-            readBy[participantId.toString()] = false;
+            readByUserIds.push(participantId)
         }
+        // else {
+        //     readBy[participantId.toString()] = false;
+        //     readByUserIds.push(participantId)
+        // }
     });
 
     // 创建消息
@@ -98,6 +128,7 @@ const sendMessageToConversation = async (conversationId, senderId, messageData) 
         conversationId,
         senderId,
         readBy,
+        readByUserIds,
         ...messageData
     });
 
@@ -461,6 +492,18 @@ const getMsgByTime = async (conversationId, userId, time, msgNum = 20) => {
     return messages
 }
 
+const markConMsgReadByConIdAndUid = async (conversationId, userId) => {
+    await Message.updateMany(
+        {
+            conversationId: conversationId,
+            readByUserIds: { $ne: userId }   // 只更新未包含该用户ID的消息
+        },
+        {
+            $addToSet: { readByUserIds: userId }
+        }
+    )
+}
+
 export default {
     getUserConversationList,
     createConversation,
@@ -477,4 +520,6 @@ export default {
     deleteAllMessages,
     getUnReadMessages,
     getMsgByTime,
+    markConMsgReadByConIdAndUid,
 };
+
