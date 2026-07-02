@@ -7,6 +7,7 @@ import { initSocket } from "./socket/chat.socket.js";
 import authRoutes from "./routes/auth.routes.js";
 import userRoutes from "./routes/user.routes.js";
 import messageRoutes from "./routes/message.routes.js";
+import adminRoutes from "./routes/admin.routes.js";
 
 import { getLogger } from './utils/logger.js'
 
@@ -24,6 +25,7 @@ app.use(express.json());
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/messages", messageRoutes);
+app.use("/api/admin", adminRoutes);
 
 // ===== Database =====
 connectDB();
