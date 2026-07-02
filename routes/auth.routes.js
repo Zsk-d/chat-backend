@@ -1,5 +1,5 @@
 import express from "express";
-import { getUser, getUserCid, closeUser } from "../controllers/auth.controller.js";
+import { getUser, getUserCid, closeUser, createVirUser } from "../controllers/auth.controller.js";
 import { internalTokenMiddleware } from "../middlewares/auth.internalTokenMiddleware.js";
 const router = express.Router();
 
@@ -8,6 +8,7 @@ const router = express.Router();
  */
 router.get("/user", internalTokenMiddleware, getUser);
 router.get("/user/cid", internalTokenMiddleware, getUserCid);
+router.get("/user/vir", internalTokenMiddleware, createVirUser);
 router.get("/user/close", internalTokenMiddleware, closeUser);
 
 export default router;

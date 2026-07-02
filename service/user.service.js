@@ -24,6 +24,22 @@ const getUserToken = async (uid, username) => {
 };
 
 /**
+ * 创建用户
+ * @param {*} uid 
+ * @param {*} vir 
+ */
+const createUser = async (uid,username, vir = false) => {
+    let user = await User.findOne({ uid });
+
+    // 如果用户不存在，则创建新用户
+    if (!user) {
+        user = new User({ uid,username, vir });
+        await user.save();
+    }
+
+    return user;
+};
+/**
  * 通过uid获取用户
  * @param {number} uid - 主系统的用户ID
  * @returns {Promise<object|null>} 用户信息
@@ -62,4 +78,5 @@ export default {
     getUserByUid,
     updateUsernameByUid,
     deleteAllUsers,
+    createUser,
 };

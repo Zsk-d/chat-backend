@@ -31,6 +31,23 @@ export const getUserCid = async (req, res) => {
   }
 };
 
+export const createVirUser = async (req, res) => {
+  try {
+    const { uid, username } = req.query;
+    let user = await userService.createUser(uid, username, true)
+
+    console.log(`获取cid uid:${uid}`);
+    if (user) {
+      res.json({ ok: true, data: user._id });
+    } else {
+      res.json({ ok: false, msg: '创建失败' });
+    }
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 export const closeUser = async (req, res) => {
   try {
     const { uid } = req.query;
