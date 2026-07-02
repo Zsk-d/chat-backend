@@ -9,7 +9,10 @@ import { create } from "domain";
 
 const logger = getLogger();
 
-const onlineUsers = new Map(); // 保存用户 socketId
+const onlineUsers = new Map(); // userId -> Set<socketId>，支持多连接
+
+// 每个用户允许的最大 WebSocket 连接数，可通过环境变量配置
+const MAX_CONNECTIONS_PER_USER = parseInt(process.env.MAX_CONNECTIONS_PER_USER) || 3;
 
 // 初始化Socket.io
 let io = null
@@ -34,6 +37,11 @@ const initConnectAuth = () => {
         try {
             const user = jwt.verify(token, process.env.JWT_SECRET);
             socket.user = user;
+            // 检查用户是否已达到最大连接数
+            const userSockets = onlineUsers.get(user.id);
+            if (userSockets && userSockets.size >= MAX_CONNECTIONS_PER_USER) {
+                return next(new Error("Maximum connection limit reached"));
+            }
             next();
         } catch (err) {
             next(new Error("Invalid token"));
@@ -45,12 +53,17 @@ const initConnectAuth = () => {
 const initConnection = () => {
     io.on("connection", async (socket) => {
         const userId = socket.user.id;
-        onlineUsers.set(userId, socket.id);
-        console.log(`✅ User connected: ${userId}`);
 
-        // 通知所有客户端：用户上线
-        // io.emit("user_online", { userId, online: true });
+        // 添加 socket 到用户的连接集合
+        if (!onlineUsers.has(userId)) {
+            onlineUsers.set(userId, new Set());
+        }
+        const isFirstConnection = onlineUsers.get(userId).size === 0;
+        onlineUsers.get(userId).add(socket.id);
 
+        console.log(`✅ User connected: ${userId} (socket: ${socket.id}, connections: ${onlineUsers.get(userId).size})`);
+
+        // 注册业务事件（每个 socket 都需要注册）
         onUserGetConversations(socket)
         onGetUnReadMessages(socket)
         onCreateConversation(socket);
@@ -67,15 +80,26 @@ const initConnection = () => {
         let conversations = await msgService.getUserConversationList(userId)
         socket.emit("connect_res", { ok: true, data: { userId, conversations } });
 
-        notiUserConnect(conversations, userId, true)
+        // 仅首次连接时通知其他用户上线
+        if (isFirstConnection) {
+            notiUserConnect(conversations, userId, true)
+        }
     });
 }
 
-const userOffline = async (userId) => {
-    // 删除用户在线状态
-    onlineUsers.delete(userId);
-    // 准备通知
-    // io.emit("user_offline", { userId, online: false });
+const userOffline = async (socketId, userId) => {
+    // 从用户的连接集合中移除该 socket
+    const userSockets = onlineUsers.get(userId);
+    if (userSockets) {
+        userSockets.delete(socketId);
+        // 如果该用户还有剩余连接，不触发离线逻辑
+        if (userSockets.size > 0) {
+            logger.info(`User ${userId} disconnected one socket, ${userSockets.size} remaining`);
+            return;
+        }
+        // 所有连接都已断开，清理用户在线状态
+        onlineUsers.delete(userId);
+    }
 
     logger.info(`User offline: ${userId}`);
 
@@ -89,30 +113,28 @@ const userOffline = async (userId) => {
 
 // 通知这些会话中除了上线者之外的在线用户, 该用户上线了
 const notiUserConnect = async (conversations, userId, isConnect) => {
-    let userIdLost = []
+    let targetSocketIds = new Set()
     for (let i = 0; i < conversations.length; i++) {
         let conversation = conversations[i];
         let { participants } = conversation
         for (let j = 0; j < participants.length; j++) {
             let participant = participants[j];
             if (participant._id.toString() !== userId.toString()) {
-                let participantSocketId = onlineUsers.get(participant._id.toString());
-                if (participantSocketId) {
-                    userIdLost.push(participantSocketId)
+                let participantSockets = onlineUsers.get(participant._id.toString());
+                if (participantSockets) {
+                    participantSockets.forEach(sid => targetSocketIds.add(sid))
                 }
             }
         }
     }
-    // 去重
-    userIdLost = [...new Set(userIdLost)]
-    userIdLost.forEach(item => io.to(item).emit("user_online", { userId, online: isConnect }))
+    targetSocketIds.forEach(sid => io.to(sid).emit("user_online", { userId, online: isConnect }))
 }
 
 // 用户断开连接事件
 const onUserDisconnect = (socket) => {
     const userId = socket.user.id;
     socket.on("disconnect", () => {
-        userOffline(userId)
+        userOffline(socket.id, userId)
     });
 }
 
@@ -179,9 +201,11 @@ const emitConversationMessage = async (message, conversationId) => {
     const receiverIds = conversation.participants.filter(id => !message.senderId || id.toString() !== message.senderId._id.toString());
     if (receiverIds && receiverIds.length > 0) {
         receiverIds.forEach(receiverUserId => {
-            let receiverSocketId = onlineUsers.get(receiverUserId.toString());
-            if (receiverSocketId) {
-                io.to(receiverSocketId).emit("receive_message", { ok: true, data: { message, conversationId } })
+            let receiverSockets = onlineUsers.get(receiverUserId.toString());
+            if (receiverSockets) {
+                receiverSockets.forEach(socketId => {
+                    io.to(socketId).emit("receive_message", { ok: true, data: { message, conversationId } })
+                })
                 // 设置用户已读
                 msgService.markMessageAsRead(message._id, receiverUserId)
             }
@@ -195,8 +219,12 @@ const emitConversationMessage = async (message, conversationId) => {
  */
 const emitConversationDeletedMessage = async (conversationId, latestUserIds) => {
     latestUserIds.forEach(item => {
-        let receiverSocketId = onlineUsers.get(item.toString());
-        io.to(receiverSocketId).emit("conversation_deleted_res", conversationId)
+        let receiverSockets = onlineUsers.get(item.toString());
+        if (receiverSockets) {
+            receiverSockets.forEach(socketId => {
+                io.to(socketId).emit("conversation_deleted_res", conversationId)
+            })
+        }
     })
 }
 /**
@@ -213,9 +241,11 @@ const emitUserConversationEvent = async (eventName, conversationId, data, exclud
     const receiverIds = conversation.participants.filter(id => !exclude || id.toString() !== exclude);
     if (receiverIds && receiverIds.length > 0) {
         receiverIds.forEach(receiverUserId => {
-            let receiverSocketId = onlineUsers.get(receiverUserId.toString());
-            if (receiverSocketId) {
-                io.to(receiverSocketId).emit(eventName, data)
+            let receiverSockets = onlineUsers.get(receiverUserId.toString());
+            if (receiverSockets) {
+                receiverSockets.forEach(socketId => {
+                    io.to(socketId).emit(eventName, data)
+                })
             }
         })
     }
@@ -263,8 +293,13 @@ const onUserSendMessage = (socket) => {
             // 处理消息通信
             await emitConversationMessage(message, conversationId)
 
-            // 同步给发送者（更新自己界面）
-            socket.emit("message_sent", { ok: true, data: { message, conversationId } });
+            // 同步给发送者的所有连接（更新自己界面）
+            let senderSockets = onlineUsers.get(userId);
+            if (senderSockets) {
+                senderSockets.forEach(sid => {
+                    io.to(sid).emit("message_sent", { ok: true, data: { message, conversationId } });
+                })
+            }
         } catch (err) {
             console.error("❌ send_message error:", err);
         }
@@ -355,10 +390,13 @@ export const getOnlineUserIds = () => Array.from(onlineUsers.keys());
 export const getOnlineNum = () => onlineUsers.size;
 
 export const closeUser = (userId) => {
-    let sId = onlineUsers.get(userId)
-    onlineUsers.delete(userId)
-    // 中断链接
-    io.to(sId).disconnectSockets()
+    let userSockets = onlineUsers.get(userId)
+    if (userSockets) {
+        userSockets.forEach(socketId => {
+            io.to(socketId).disconnectSockets()
+        })
+        onlineUsers.delete(userId)
+    }
 }
 
 
