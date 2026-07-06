@@ -86,10 +86,27 @@ const getVirConversationList = async (page = 1, limit = 20) => {
         const conversationObj = conversation.toObject();
         conversationObj.virUsers = (conversationObj.participants || []).filter(item => item.vir);
         conversationObj.customerUsers = (conversationObj.participants || []).filter(item => !item.vir);
-        conversationObj.hasUnread = false;
-        conversationObj.unreadCount = 0;
         return conversationObj;
     });
+
+    // 管理端的未读状态，默认按会话里第一个虚拟用户来判断。
+    // 这样连接完成后，列表就能直接展示离线期间的新消息红点。
+    await Promise.all(rows.map(async (conversationObj) => {
+        const virUser = conversationObj.virUsers?.[0];
+        if (!virUser?._id) {
+            conversationObj.hasUnread = false;
+            conversationObj.unreadCount = 0;
+            return;
+        }
+
+        const unreadCount = await Message.countDocuments({
+            conversationId: conversationObj._id,
+            readByUserIds: { $ne: virUser._id },
+            deleted: false
+        });
+        conversationObj.hasUnread = unreadCount > 0;
+        conversationObj.unreadCount = unreadCount;
+    }));
 
     return {
         rows,
