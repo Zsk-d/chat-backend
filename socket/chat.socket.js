@@ -11,6 +11,8 @@ const logger = getLogger();
 
 const onlineUsers = new Map(); // userId -> Set<socketId>，支持多连接
 const adminUsers = new Map();
+const adminProfiles = new Map(); // userId -> { userId, nickname, mail }
+const adminActiveConversationByUser = new Map(); // userId -> conversationId
 
 // 每个用户允许的最大 WebSocket 连接数，可通过环境变量配置
 const MAX_CONNECTIONS_PER_USER = parseInt(process.env.MAX_CONNECTIONS_PER_USER) || 3;
@@ -102,6 +104,13 @@ const initConnection = () => {
         }
         const isFirstConnection = userMap.get(userId).size === 0;
         userMap.get(userId).add(socket.id);
+        if (isAdmin) {
+            adminProfiles.set(userId, {
+                userId,
+                nickname: socket.user.nickname || socket.user.username || socket.user.mail || `Admin-${userId}`,
+                mail: socket.user.mail || ""
+            });
+        }
 
         console.log(`✅ User connected: ${userId} (socket: ${socket.id}, connections: ${userMap.get(userId).size}, isAdmin: ${isAdmin})`);
 
@@ -115,6 +124,7 @@ const initConnection = () => {
         onLeaveConversation(socket)
         onGetMsgByTime(socket)
         onConversationMsgRead(socket)
+        onAdminConversationFocus(socket)
         // 断开连接
         onUserDisconnect(socket);
 
@@ -128,7 +138,9 @@ const initConnection = () => {
                     userId,
                     isAdmin,
                     conversations: conversationPage.rows,
-                    pagination: conversationPage.pagination
+                    pagination: conversationPage.pagination,
+                    currentAdminName: socket.user.nickname || socket.user.username || socket.user.mail || `Admin-${userId}`,
+                    adminConversationActives: buildAdminConversationActiveSnapshot()
                 }
             });
         } else {
@@ -156,6 +168,9 @@ const userOffline = async (socketId, userId, isAdmin = false) => {
         // 所有连接都已断开，清理用户在线状态
         if (isAdmin) {
             adminUsers.delete(userId);
+            adminProfiles.delete(userId);
+            adminActiveConversationByUser.delete(userId);
+            emitAdminConversationActiveSnapshot();
         } else {
             onlineUsers.delete(userId);
         }
@@ -273,6 +288,75 @@ const emitAdminConversationEvent = async (eventName, data) => {
 
     adminSocketIds.forEach(socketId => {
         io.to(socketId).emit(eventName, data)
+    })
+}
+
+const buildAdminConversationActiveSnapshot = () => {
+    const snapshot = {}
+    adminActiveConversationByUser.forEach((conversationId, userId) => {
+        if (!conversationId) {
+            return
+        }
+        const adminProfile = adminProfiles.get(userId) || { userId }
+        if (!snapshot[conversationId]) {
+            snapshot[conversationId] = []
+        }
+        snapshot[conversationId].push({
+            userId,
+            nickname: adminProfile.nickname || adminProfile.mail || userId,
+            mail: adminProfile.mail || ''
+        })
+    })
+    return snapshot
+}
+
+const emitAdminConversationActiveSnapshot = () => {
+    if (!io) {
+        return
+    }
+    const snapshot = buildAdminConversationActiveSnapshot()
+    const adminSocketIds = new Set()
+    adminUsers.forEach(socketIds => {
+        socketIds.forEach(socketId => adminSocketIds.add(socketId))
+    })
+    adminSocketIds.forEach(socketId => {
+        io.to(socketId).emit("admin_conversation_active_snapshot", {
+            ok: true,
+            data: { adminConversationActives: snapshot }
+        })
+    })
+}
+
+const syncAdminConversationFocus = async (userId, conversationId, adminProfilePayload = {}) => {
+    if (!userId) {
+        return
+    }
+    const currentProfile = adminProfiles.get(userId) || { userId }
+    adminProfiles.set(userId, {
+        userId,
+        nickname: adminProfilePayload.nickname || currentProfile.nickname || currentProfile.mail || `Admin-${userId}`,
+        mail: adminProfilePayload.mail || currentProfile.mail || ""
+    })
+    if (conversationId) {
+        adminActiveConversationByUser.set(userId, conversationId)
+    } else {
+        adminActiveConversationByUser.delete(userId)
+    }
+    emitAdminConversationActiveSnapshot()
+    await emitAdminConversationEvent("admin_conversation_active_changed", {
+        ok: true,
+        data: {
+            conversationId: conversationId || null,
+            activeAdmins: conversationId ? (buildAdminConversationActiveSnapshot()[conversationId] || []) : [],
+            activeAdmin: conversationId ? (() => {
+                const adminProfile = adminProfiles.get(userId) || { userId }
+                return {
+                    userId,
+                    nickname: adminProfile.nickname || adminProfile.mail || userId,
+                    mail: adminProfile.mail || ""
+                }
+            })() : null
+        }
     })
 }
 
@@ -533,15 +617,34 @@ const onConversationMsgRead = async (socket) => {
                 }
                 await msgService.markConMsgReadByConIdAndUid(conversationId, targetSenderId);
                 emitUserConversationEvent('conversation_msg_read_res', conversationId, { ok: true, data: { conversationId, uid: targetSenderId } }, targetSenderId)
+                await emitAdminConversationEvent('conversation_msg_read_res', { ok: true, data: { conversationId, uid: targetSenderId } })
                 return;
             }
             let msgList = await msgService.markConMsgReadByConIdAndUid(conversationId, userId);
             // 通知该频道下的其他人, 某人已经读取了所有消息
             emitUserConversationEvent('conversation_msg_read_res', conversationId, { ok: true, data: { conversationId, uid: userId } }, userId)
+            const hasVirUser = await User.exists({ _id: { $in: (await Conversation.findById(conversationId))?.participants || [] }, vir: true })
+            if (hasVirUser) {
+                await emitAdminConversationEvent('conversation_msg_read_res', { ok: true, data: { conversationId, uid: userId } })
+            }
             // socket.emit("get_msg_by_time_res", { ok: true, data: { messages: msgList, conversationId } });
         } catch (error) {
             // socket.emit("get_msg_by_time_res", { ok: false, msg: 'chat.error.getMsgListError' });
         }
+    });
+}
+
+const onAdminConversationFocus = (socket) => {
+    const userId = socket.user.id;
+    const isAdmin = !!socket.user.isAdmin;
+    if (!isAdmin) {
+        return;
+    }
+    socket.on("admin_conversation_focus", async (data = {}) => {
+        await syncAdminConversationFocus(userId, data?.conversationId || null, {
+            nickname: data?.nickname || "",
+            mail: data?.mail || ""
+        });
     });
 }
 
