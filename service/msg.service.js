@@ -1,4 +1,4 @@
-import { Message, Conversation, User } from "../models/index.js";
+﻿import { Message, Conversation, User } from "../models/index.js";
 
 /**
  * 通过用户ID获取参与的会话列表
@@ -41,6 +41,38 @@ const getUserConversationList = async (userId) => {
     }));
 
     return conversationsWithUnread;
+};
+
+/**
+ * 获取所有包含虚拟用户的会话。
+ * 管理端会基于这个列表展示“虚拟用户聊天”页面。
+ * 这里直接返回带有 virUsers/customerUsers 标记的会话数据，方便前端做差异化展示。
+ */
+const getVirConversationList = async () => {
+    const virUsers = await User.find({ vir: true }).select('_id');
+    const virIds = virUsers.map(item => item._id);
+    if (!virIds.length) {
+        return [];
+    }
+
+    const conversations = await Conversation.find({ participants: { $in: virIds } })
+        .populate('participants', 'username uid vir')
+        .populate({
+            path: 'lastMessage',
+            populate: {
+                path: 'senderId',
+                select: 'username uid vir'
+            }
+        });
+
+    return conversations.map(conversation => {
+        const conversationObj = conversation.toObject();
+        conversationObj.virUsers = (conversationObj.participants || []).filter(item => item.vir);
+        conversationObj.customerUsers = (conversationObj.participants || []).filter(item => !item.vir);
+        conversationObj.hasUnread = false;
+        conversationObj.unreadCount = 0;
+        return conversationObj;
+    });
 };
 
 /**
@@ -150,14 +182,14 @@ const sendMessageToConversation = async (conversationId, senderId, messageData) 
  * @param {number} limit - 每页数量，默认为20
  * @returns {Promise<object>} 包含消息列表和分页信息的对象
  */
-const getConversationMessages = async (conversationId, page = 1, limit = 20, userId = null) => {
+const getConversationMessages = async (conversationId, page = 1, limit = 20, userId = null, allowAdmin = false) => {
     // 验证会话是否存在
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
         throw new Error('会话不存在');
     }
 
-    if (userId) {
+    if (userId && !allowAdmin) {
         // 如果传了用户ID, 则检查是否在会话中
         const isParticipant = conversation.participants.some(
             participantId => participantId.toString() === userId.toString()
@@ -203,7 +235,7 @@ const getConversationMessages = async (conversationId, page = 1, limit = 20, use
  * @param {string} conversationId - 会话ID
  * @returns {Promise<object|null>} 最后一条消息
  */
-const getLastMessageInConversation = async (conversationId, userId) => {
+const getLastMessageInConversation = async (conversationId, userId, allowAdmin = false) => {
     // 验证会话是否存在
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
@@ -211,7 +243,7 @@ const getLastMessageInConversation = async (conversationId, userId) => {
     }
 
     // 如果传了用户ID, 则检查是否在会话中
-    if (userId) {
+    if (userId && !allowAdmin) {
         const isParticipant = conversation.participants.some(
             participantId => participantId.toString() === userId.toString()
         );
@@ -461,33 +493,37 @@ const getUnReadMessages = async (conversationId, userId) => {
     return unreadMessages;
 }
 // 通过最晚消息时间, 获取N条以前的消息
-const getMsgByTime = async (conversationId, userId, time, msgNum = 20) => {
-    // 验证会话是否存在
+const getMsgByTime = async (conversationId, userId, time, msgNum = 20, allowAdmin = false) => {
+    // 楠岃瘉浼氳瘽鏄惁瀛樺湪
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
         throw new Error('会话不存在');
     }
 
-    // 检查用户是否在会话中
-    const isParticipant = conversation.participants.some(
-        participant => participant.toString() === userId.toString()
-    );
+    // 鍦ㄦ櫘閫氱敤鎴峰満鏅笅锛岄渶瑕佹鏌ョ敤鎴锋槸鍚﹀湪浼氳瘽涓?
+    if (userId && !allowAdmin) {
+        const isParticipant = conversation.participants.some(
+            participant => participant.toString() === userId.toString()
+        );
 
-    if (!isParticipant) {
-        throw new Error('用户不在会话中');
+        if (!isParticipant) {
+            throw new Error('用户不在会话中');
+        }
     }
 
-    // 获取用户的消息
+    // 鑾峰彇鐢ㄦ埛鐨勬秷鎭?
     const messages = await Message.find({
         conversationId,
         createdAt: { $lt: time },
         deleted: false
     }).sort({ createdAt: -1 }).limit(msgNum).populate('senderId', 'username')
 
-    // 同时更新用户的已读状态
-    for (const message of messages) {
-        message.readBy.set(userId, true);
-        await message.save();
+    // 鍚屾椂鏇存柊鐢ㄦ埛鐨勫凡璇荤姸鎬?锛屽鏍稿憳鏌ョ湅鏃堕渶瑕佽烦杩囬槄璇诲洖鍐欙紝鍚﹀垯浼氬奖鍝嶄粙闈笂鐨勬湭璇荤姸鎬?
+    if (!allowAdmin) {
+        for (const message of messages) {
+            message.readBy.set(userId, true);
+            await message.save();
+        }
     }
     return messages
 }
@@ -506,6 +542,7 @@ const markConMsgReadByConIdAndUid = async (conversationId, userId) => {
 
 export default {
     getUserConversationList,
+    getVirConversationList,
     createConversation,
     sendMessageToConversation,
     getConversationMessages,
@@ -522,4 +559,6 @@ export default {
     getMsgByTime,
     markConMsgReadByConIdAndUid,
 };
+
+
 

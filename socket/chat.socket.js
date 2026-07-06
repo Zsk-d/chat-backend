@@ -1,4 +1,4 @@
-import { Server } from "socket.io";
+﻿import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 import { Message, Conversation, User } from "../models/index.js";
 import { getLogger } from '../utils/logger.js'
@@ -10,6 +10,7 @@ import { create } from "domain";
 const logger = getLogger();
 
 const onlineUsers = new Map(); // userId -> Set<socketId>，支持多连接
+const adminUsers = new Map();
 
 // 每个用户允许的最大 WebSocket 连接数，可通过环境变量配置
 const MAX_CONNECTIONS_PER_USER = parseInt(process.env.MAX_CONNECTIONS_PER_USER) || 3;
@@ -37,9 +38,11 @@ const initConnectAuth = () => {
         try {
             const user = jwt.verify(token, process.env.JWT_SECRET);
             socket.user = user;
+            socket.user.isAdmin = !!user.isAdmin;
+
             // 检查用户是否已达到最大连接数
             const userSockets = onlineUsers.get(user.id);
-            if (userSockets && userSockets.size >= MAX_CONNECTIONS_PER_USER) {
+            if (!socket.user.isAdmin && userSockets && userSockets.size >= MAX_CONNECTIONS_PER_USER) {
                 return next(new Error("Maximum connection limit reached"));
             }
             next();
@@ -53,15 +56,17 @@ const initConnectAuth = () => {
 const initConnection = () => {
     io.on("connection", async (socket) => {
         const userId = socket.user.id;
+        const isAdmin = !!socket.user.isAdmin;
+        const userMap = isAdmin ? adminUsers : onlineUsers;
 
         // 添加 socket 到用户的连接集合
-        if (!onlineUsers.has(userId)) {
-            onlineUsers.set(userId, new Set());
+        if (!userMap.has(userId)) {
+            userMap.set(userId, new Set());
         }
-        const isFirstConnection = onlineUsers.get(userId).size === 0;
-        onlineUsers.get(userId).add(socket.id);
+        const isFirstConnection = userMap.get(userId).size === 0;
+        userMap.get(userId).add(socket.id);
 
-        console.log(`✅ User connected: ${userId} (socket: ${socket.id}, connections: ${onlineUsers.get(userId).size})`);
+        console.log(`✅ User connected: ${userId} (socket: ${socket.id}, connections: ${userMap.get(userId).size}, isAdmin: ${isAdmin})`);
 
         // 注册业务事件（每个 socket 都需要注册）
         onUserGetConversations(socket)
@@ -77,19 +82,19 @@ const initConnection = () => {
         onUserDisconnect(socket);
 
         // 返回用户的通信用户id, 以及他的所有会话
-        let conversations = await msgService.getUserConversationList(userId)
-        socket.emit("connect_res", { ok: true, data: { userId, conversations } });
+        let conversations = isAdmin ? await msgService.getVirConversationList() : await msgService.getUserConversationList(userId)
+        socket.emit("connect_res", { ok: true, data: { userId, isAdmin, conversations } });
 
         // 仅首次连接时通知其他用户上线
-        if (isFirstConnection) {
+        if (isFirstConnection && !isAdmin) {
             notiUserConnect(conversations, userId, true)
         }
     });
 }
 
-const userOffline = async (socketId, userId) => {
+const userOffline = async (socketId, userId, isAdmin = false) => {
     // 从用户的连接集合中移除该 socket
-    const userSockets = onlineUsers.get(userId);
+    const userSockets = isAdmin ? adminUsers.get(userId) : onlineUsers.get(userId);
     if (userSockets) {
         userSockets.delete(socketId);
         // 如果该用户还有剩余连接，不触发离线逻辑
@@ -98,7 +103,11 @@ const userOffline = async (socketId, userId) => {
             return;
         }
         // 所有连接都已断开，清理用户在线状态
-        onlineUsers.delete(userId);
+        if (isAdmin) {
+            adminUsers.delete(userId);
+        } else {
+            onlineUsers.delete(userId);
+        }
     }
 
     logger.info(`User offline: ${userId}`);
@@ -133,18 +142,20 @@ const notiUserConnect = async (conversations, userId, isConnect) => {
 // 用户断开连接事件
 const onUserDisconnect = (socket) => {
     const userId = socket.user.id;
+    const isAdmin = !!socket.user.isAdmin;
     socket.on("disconnect", () => {
-        userOffline(socket.id, userId)
+        userOffline(socket.id, userId, isAdmin)
     });
 }
 
 // 获取用户最新的消息
 const onUserGetLatestMsg = (socket) => {
     const userId = socket.user.id;
+    const allowAdmin = !!socket.user.isAdmin;
     socket.on("get_latest_msg", async (data) => {
         let { conversationId, page, pageSize } = data
         try {
-            let msgList = await msgService.getConversationMessages(conversationId, pageSize, page, userId)
+            let msgList = await msgService.getConversationMessages(conversationId, pageSize, page, userId, allowAdmin)
             socket.emit("get_latest_msg_res", { ok: true, data: msgList });
         } catch (error) {
             socket.emit("get_latest_msg_res", { ok: false, msg: 'chat.error.get_latest_msg' });
@@ -192,6 +203,17 @@ const onLeaveConversation = (socket) => {
         }
     })
 }
+const emitAdminConversationMessage = async (message, conversationId) => {
+    const adminSocketIds = new Set()
+    adminUsers.forEach(socketIds => {
+        socketIds.forEach(socketId => adminSocketIds.add(socketId))
+    })
+
+    adminSocketIds.forEach(socketId => {
+        io.to(socketId).emit("admin_receive_message", { ok: true, data: { message, conversationId } })
+    })
+}
+
 // 传递用户消息
 const emitConversationMessage = async (message, conversationId) => {
     // 更新会话最后消息
@@ -210,6 +232,12 @@ const emitConversationMessage = async (message, conversationId) => {
                 msgService.markMessageAsRead(message._id, receiverUserId)
             }
         })
+    }
+
+    // 只要是包含虚拟用户的会话，管理端也同步收到一份消息
+    const virUsers = await User.exists({ _id: { $in: conversation.participants }, vir: true })
+    if (virUsers) {
+        await emitAdminConversationMessage(message, conversationId)
     }
 }
 /**
@@ -304,6 +332,44 @@ const onUserSendMessage = (socket) => {
             console.error("❌ send_message error:", err);
         }
     });
+
+    // 管理员以虚拟用户身份发送消息
+    socket.on("admin_send_message", async (data) => {
+        try {
+            const { conversationId, content, type, senderId } = data;
+            if (!socket.user.isAdmin) {
+                socket.emit("admin_send_message_res", { ok: false, msg: "chat.error.no_permission" });
+                return;
+            }
+            if (!conversationId) {
+                socket.emit("admin_send_message_res", { ok: false, msg: "chat.error.no_conversation_id" });
+                return;
+            }
+            if (!senderId) {
+                socket.emit("admin_send_message_res", { ok: false, msg: "chat.error.no_sender" });
+                return;
+            }
+
+            const senderUser = await User.findById(senderId);
+            if (!senderUser || !senderUser.vir) {
+                socket.emit("admin_send_message_res", { ok: false, msg: "chat.error.no_permission" });
+                return;
+            }
+
+            const conversation = await Conversation.findById(conversationId)
+            if (!conversation) {
+                socket.emit("admin_send_message_res", { ok: false, msg: "chat.error.no_conversation" });
+                return;
+            }
+
+            const message = await msgService.sendMessageToConversation(conversationId, senderId, { content, type })
+            await emitConversationMessage(message, conversationId)
+
+            socket.emit("admin_send_message_res", { ok: true, data: { message, conversationId } })
+        } catch (err) {
+            socket.emit("admin_send_message_res", { ok: false, msg: err.message || "chat.error.send_message" });
+        }
+    });
 }
 
 /**
@@ -312,20 +378,24 @@ const onUserSendMessage = (socket) => {
  */
 const onUserGetConversations = (socket) => {
     const userId = socket.user.id;
+    const isAdmin = !!socket.user.isAdmin;
     // 监听获取会话列表事件
     socket.on("get_conversations", async () => {
-        let cList = await msgService.getUserConversationList(userId);
+        let cList = isAdmin ? await msgService.getVirConversationList() : await msgService.getUserConversationList(userId);
         // 整理消息数据
         cList = cList.map(item => {
-            let { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread } = item
-            return { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread }
+            let { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread, virUsers, customerUsers } = item
+            return { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread, virUsers, customerUsers }
         })
         // 设定用户登录状态
         cList.forEach(c => {
-            let users = c.participants.filter(item => item.toString() !== userId.toString())
-            users.forEach(u => {
-                u.online = onlineUsers.has(u._id.toString())
-            })
+            if (Array.isArray(c.participants)) {
+                c.participants.forEach((u) => {
+                    if (u && u._id) {
+                        u.online = onlineUsers.has(u._id.toString())
+                    }
+                })
+            }
         })
         socket.emit("get_conversations_res", cList);
     });
@@ -348,11 +418,12 @@ const onGetUnReadMessages = async (socket) => {
 
 const onGetMsgByTime = async (socket) => {
     const userId = socket.user.id;
+    const allowAdmin = !!socket.user.isAdmin;
     socket.on("get_msg_by_time", async (data) => {
         let { conversationId, time } = data
         let queryTime = new Date(time)
         try {
-            let msgList = await msgService.getMsgByTime(conversationId, userId, queryTime);
+            let msgList = await msgService.getMsgByTime(conversationId, userId, queryTime, 20, allowAdmin);
             socket.emit("get_msg_by_time_res", { ok: true, data: { messages: msgList, conversationId } });
         } catch (error) {
             socket.emit("get_msg_by_time_res", { ok: false, msg: 'chat.error.getMsgListError' });
@@ -362,11 +433,15 @@ const onGetMsgByTime = async (socket) => {
 
 const onConversationMsgRead = async (socket) => {
     const userId = socket.user.id;
+    const allowAdmin = !!socket.user.isAdmin;
 
     socket.on("conversation_msg_read", async (data) => {
         let { conversationId } = data
 
         try {
+            if (allowAdmin) {
+                return;
+            }
             let msgList = await msgService.markConMsgReadByConIdAndUid(conversationId, userId);
             // 通知该频道下的其他人, 某人已经读取了所有消息
             emitUserConversationEvent('conversation_msg_read_res', conversationId, { ok: true, data: { conversationId, uid: userId } }, userId)
@@ -410,3 +485,5 @@ export const closeUser = (userId) => {
 //     connectDB()
 // }
 // await test()
+
+

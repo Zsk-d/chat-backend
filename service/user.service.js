@@ -7,7 +7,7 @@ import { signToken } from "../utils/jwt.js";
  * @param {string} username - 用户名
  * @returns {Promise<object>} 包含token和user信息的对象
  */
-const getUserToken = async (uid, username) => {
+const getUserToken = async (uid, username, isAdmin = false) => {
     // 查找用户是否存在
     let user = await User.findOne({ uid });
 
@@ -18,7 +18,11 @@ const getUserToken = async (uid, username) => {
     }
 
     // 生成token
-    const token = signToken({ id: user._id, uid: uid });
+    let data = { id: user._id, uid: uid }
+    if (isAdmin) {
+        data.isAdmin = true
+    }
+    const token = signToken(data);
 
     return { token };
 };
@@ -28,12 +32,16 @@ const getUserToken = async (uid, username) => {
  * @param {*} uid 
  * @param {*} vir 
  */
-const createUser = async (uid,username, vir = false) => {
+const createUser = async (uid, username, vir = false) => {
     let user = await User.findOne({ uid });
 
     // 如果用户不存在，则创建新用户
     if (!user) {
-        user = new User({ uid,username, vir });
+        user = new User({ uid, username, vir });
+        await user.save();
+    } else {
+        // 如果用户已存在，则更新用户名
+        user.username = username;
         await user.save();
     }
 

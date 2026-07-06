@@ -3,8 +3,8 @@ import { closeUser as socketCloseUser } from "../socket/chat.socket.js"
 
 export const getUser = async (req, res) => {
   try {
-    const { uid, name } = req.query;
-    let tokenRes = await userService.getUserToken(uid, name)
+    const { uid, name, isAdmin } = req.query;
+    let tokenRes = await userService.getUserToken(uid, name, isAdmin === 'true' || isAdmin === true)
 
     console.log(`获取TOKEN uid:${uid} name:${name}`);
 
