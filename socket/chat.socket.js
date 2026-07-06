@@ -265,6 +265,17 @@ const emitAdminConversationMessage = async (message, conversationId) => {
     })
 }
 
+const emitAdminConversationEvent = async (eventName, data) => {
+    const adminSocketIds = new Set()
+    adminUsers.forEach(socketIds => {
+        socketIds.forEach(socketId => adminSocketIds.add(socketId))
+    })
+
+    adminSocketIds.forEach(socketId => {
+        io.to(socketId).emit(eventName, data)
+    })
+}
+
 // 传递用户消息
 const emitConversationMessage = async (message, conversationId) => {
     // 更新会话最后消息
@@ -339,6 +350,10 @@ const onCreateConversation = (socket) => {
         if (conversation) {
             let { _id, name, type } = conversation
             await emitUserConversationEvent('create_conversation_res', _id, { ok: true, data: { _id, name, type } })
+            const hasVirUser = await User.exists({ _id: { $in: conversation.participants }, vir: true })
+            if (hasVirUser) {
+                await emitAdminConversationEvent('create_conversation_res', { ok: true, data: { _id, name, type } })
+            }
         } else {
             socket.emit("create_conversation_res", { ok: false, msg: "chat.error.create_conversation" });
         }
