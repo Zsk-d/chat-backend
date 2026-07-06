@@ -82,8 +82,21 @@ const initConnection = () => {
         onUserDisconnect(socket);
 
         // 返回用户的通信用户id, 以及他的所有会话
-        let conversations = isAdmin ? await msgService.getVirConversationList() : await msgService.getUserConversationList(userId)
-        socket.emit("connect_res", { ok: true, data: { userId, isAdmin, conversations } });
+        if (isAdmin) {
+            const conversationPage = await msgService.getVirConversationList(1, 20);
+            socket.emit("connect_res", {
+                ok: true,
+                data: {
+                    userId,
+                    isAdmin,
+                    conversations: conversationPage.rows,
+                    pagination: conversationPage.pagination
+                }
+            });
+        } else {
+            let conversations = await msgService.getUserConversationList(userId)
+            socket.emit("connect_res", { ok: true, data: { userId, isAdmin, conversations } });
+        }
 
         // 仅首次连接时通知其他用户上线
         if (isFirstConnection && !isAdmin) {
@@ -380,14 +393,34 @@ const onUserGetConversations = (socket) => {
     const userId = socket.user.id;
     const isAdmin = !!socket.user.isAdmin;
     // 监听获取会话列表事件
-    socket.on("get_conversations", async () => {
-        let cList = isAdmin ? await msgService.getVirConversationList() : await msgService.getUserConversationList(userId);
-        // 整理消息数据
+    socket.on("get_conversations", async (data = {}) => {
+        const page = Math.max(parseInt(data.page) || 1, 1);
+        const pageSize = Math.max(parseInt(data.pageSize) || 20, 1);
+
+        if (isAdmin) {
+            const conversationPage = await msgService.getVirConversationList(page, pageSize);
+            let cList = conversationPage.rows.map(item => {
+                let { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread, virUsers, customerUsers } = item
+                return { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread, virUsers, customerUsers }
+            })
+            cList.forEach(c => {
+                if (Array.isArray(c.participants)) {
+                    c.participants.forEach((u) => {
+                        if (u && u._id) {
+                            u.online = onlineUsers.has(u._id.toString())
+                        }
+                    })
+                }
+            })
+            socket.emit("get_conversations_res", { ok: true, data: { conversations: cList, pagination: conversationPage.pagination, append: page > 1 } });
+            return;
+        }
+
+        let cList = await msgService.getUserConversationList(userId);
         cList = cList.map(item => {
             let { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread, virUsers, customerUsers } = item
             return { _id, name, type, createdAt, lastMessageAt, lastMessage, participants, unreadCount, hasUnread, virUsers, customerUsers }
         })
-        // 设定用户登录状态
         cList.forEach(c => {
             if (Array.isArray(c.participants)) {
                 c.participants.forEach((u) => {

@@ -46,16 +46,33 @@ const getUserConversationList = async (userId) => {
 /**
  * 获取所有包含虚拟用户的会话。
  * 管理端会基于这个列表展示“虚拟用户聊天”页面。
- * 这里直接返回带有 virUsers/customerUsers 标记的会话数据，方便前端做差异化展示。
+ * 支持分页，默认按最近消息时间倒序。
  */
-const getVirConversationList = async () => {
+const getVirConversationList = async (page = 1, limit = 20) => {
     const virUsers = await User.find({ vir: true }).select('_id');
     const virIds = virUsers.map(item => item._id);
     if (!virIds.length) {
-        return [];
+        return {
+            rows: [],
+            pagination: {
+                currentPage: page,
+                pageSize: limit,
+                total: 0,
+                totalPages: 0,
+                hasNextPage: false,
+                hasPrevPage: page > 1
+            }
+        };
     }
 
-    const conversations = await Conversation.find({ participants: { $in: virIds } })
+    const query = { participants: { $in: virIds } };
+    const total = await Conversation.countDocuments(query);
+    const skip = (page - 1) * limit;
+
+    const conversations = await Conversation.find(query)
+        .sort({ lastMessageAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
         .populate('participants', 'username uid vir')
         .populate({
             path: 'lastMessage',
@@ -65,7 +82,7 @@ const getVirConversationList = async () => {
             }
         });
 
-    return conversations.map(conversation => {
+    const rows = conversations.map(conversation => {
         const conversationObj = conversation.toObject();
         conversationObj.virUsers = (conversationObj.participants || []).filter(item => item.vir);
         conversationObj.customerUsers = (conversationObj.participants || []).filter(item => !item.vir);
@@ -73,6 +90,18 @@ const getVirConversationList = async () => {
         conversationObj.unreadCount = 0;
         return conversationObj;
     });
+
+    return {
+        rows,
+        pagination: {
+            currentPage: page,
+            pageSize: limit,
+            total,
+            totalPages: Math.ceil(total / limit),
+            hasNextPage: page < Math.ceil(total / limit),
+            hasPrevPage: page > 1
+        }
+    };
 };
 
 /**
