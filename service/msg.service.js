@@ -7,7 +7,7 @@
  */
 const getUserConversationList = async (userId) => {
     let res = await Conversation.find({ participants: { $in: [userId] } })
-        .populate('participants', 'username uid')
+        .populate('participants', 'username uid vir online')
         .populate({
             path: 'lastMessage',
             populate: {
@@ -73,7 +73,7 @@ const getVirConversationList = async (page = 1, limit = 20) => {
         .sort({ lastMessageAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate('participants', 'username uid vir')
+        .populate('participants', 'username uid vir online')
         .populate({
             path: 'lastMessage',
             populate: {

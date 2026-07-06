@@ -1,7 +1,7 @@
 import User from "../models/user.model.js";
 import Conversation from "../models/conversation.model.js";
 import Message from "../models/message.model.js";
-import { getOnlineUserIds } from "../socket/chat.socket.js";
+import { getOnlineUserIds, setVirtualUserOnlineState } from "../socket/chat.socket.js";
 
 /**
  * POST /admin/chat/online
@@ -16,12 +16,12 @@ export const getOnlineByUids = async (req, res) => {
         }
 
         // 查找这些uid对应的chat用户
-        const chatUsers = await User.find({ uid: { $in: uids } }).select("_id uid");
+        const chatUsers = await User.find({ uid: { $in: uids } }).select("_id uid online vir");
         const onlineSet = new Set(getOnlineUserIds());
 
         // 过滤出在线的uid
         const onlineUids = chatUsers
-            .filter(u => onlineSet.has(u._id.toString()))
+            .filter(u => onlineSet.has(u._id.toString()) || u.online)
             .map(u => u.uid);
 
         res.json({ ok: true, data: onlineUids });
@@ -50,7 +50,7 @@ export const searchConversations = async (req, res) => {
 
         // 按参与者uid查询
         if (Array.isArray(participantUids) && participantUids.length > 0) {
-            const chatUsers = await User.find({ uid: { $in: participantUids } }).select("_id");
+            const chatUsers = await User.find({ uid: { $in: participantUids } }).select("_id online vir");
             if (chatUsers.length === 0) {
                 return res.json({ ok: true, data: { total: 0, rows: [] } });
             }
@@ -71,7 +71,7 @@ export const searchConversations = async (req, res) => {
 
         // 收集所有参与者的chat _id, 批量查询User
         const allParticipantIds = [...new Set(conversations.flatMap(c => c.participants.map(p => p.toString())))];
-        const participantUsers = await User.find({ _id: { $in: allParticipantIds } }).select("_id uid username").lean();
+        const participantUsers = await User.find({ _id: { $in: allParticipantIds } }).select("_id uid username online vir").lean();
         const userMap = new Map(participantUsers.map(u => [u._id.toString(), u]));
 
         const onlineSet = new Set(getOnlineUserIds());
@@ -85,7 +85,7 @@ export const searchConversations = async (req, res) => {
                 return {
                     uid: u ? u.uid : null,
                     username: u ? u.username : null,
-                    online: onlineSet.has(p.toString())
+                    online: onlineSet.has(p.toString()) || !!(u && u.online)
                 };
             }),
             lastMessage: c.lastMessage ? {
@@ -100,6 +100,25 @@ export const searchConversations = async (req, res) => {
         res.json({ ok: true, data: { total, rows } });
     } catch (err) {
         console.error("searchConversations error:", err);
+        res.status(500).json({ ok: false, msg: err.message });
+    }
+};
+
+/**
+ * POST /admin/chat/vir/status
+ * 手动切换虚拟用户在线状态
+ * Body: { uid, online }
+ */
+export const setVirOnlineStatus = async (req, res) => {
+    try {
+        const { uid, online } = req.body;
+        if (uid === undefined || uid === null) {
+            return res.status(400).json({ ok: false, msg: "uid is required" });
+        }
+        const user = await setVirtualUserOnlineState(uid, !!online);
+        res.json({ ok: true, data: { uid: user.uid, online: !!user.online } });
+    } catch (err) {
+        console.error("setVirOnlineStatus error:", err);
         res.status(500).json({ ok: false, msg: err.message });
     }
 };

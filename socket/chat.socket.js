@@ -15,6 +15,42 @@ const adminUsers = new Map();
 // 每个用户允许的最大 WebSocket 连接数，可通过环境变量配置
 const MAX_CONNECTIONS_PER_USER = parseInt(process.env.MAX_CONNECTIONS_PER_USER) || 3;
 
+const isConnectedOnline = (userId) => {
+    return onlineUsers.has(userId.toString());
+}
+
+const isPersistedOnline = (userDoc) => {
+    return !!userDoc?.online;
+}
+
+const isUserOnline = (userDoc) => {
+    if (!userDoc || !userDoc._id) {
+        return false;
+    }
+    return isConnectedOnline(userDoc._id) || isPersistedOnline(userDoc);
+}
+
+const emitUserOnlineStateToConversations = async (userId, online) => {
+    const targetSocketIds = new Set();
+    const conversations = await Conversation.find({ participants: { $in: [userId] } }).populate('participants', 'username uid vir online');
+    for (let i = 0; i < conversations.length; i++) {
+        const conversation = conversations[i];
+        if (!conversation) {
+            continue;
+        }
+        for (let j = 0; j < conversation.participants.length; j++) {
+            const participant = conversation.participants[j];
+            if (participant._id.toString() !== userId.toString() && onlineUsers.has(participant._id.toString())) {
+                const participantSockets = onlineUsers.get(participant._id.toString());
+                if (participantSockets) {
+                    participantSockets.forEach(sid => targetSocketIds.add(sid));
+                }
+            }
+        }
+    }
+    targetSocketIds.forEach(sid => io.to(sid).emit("user_online", { userId, online }));
+}
+
 // 初始化Socket.io
 let io = null
 
@@ -58,6 +94,7 @@ const initConnection = () => {
         const userId = socket.user.id;
         const isAdmin = !!socket.user.isAdmin;
         const userMap = isAdmin ? adminUsers : onlineUsers;
+        let conversations = [];
 
         // 添加 socket 到用户的连接集合
         if (!userMap.has(userId)) {
@@ -84,6 +121,7 @@ const initConnection = () => {
         // 返回用户的通信用户id, 以及他的所有会话
         if (isAdmin) {
             const conversationPage = await msgService.getVirConversationList(1, 20);
+            conversations = conversationPage.rows;
             socket.emit("connect_res", {
                 ok: true,
                 data: {
@@ -94,7 +132,7 @@ const initConnection = () => {
                 }
             });
         } else {
-            let conversations = await msgService.getUserConversationList(userId)
+            conversations = await msgService.getUserConversationList(userId)
             socket.emit("connect_res", { ok: true, data: { userId, isAdmin, conversations } });
         }
 
@@ -407,7 +445,7 @@ const onUserGetConversations = (socket) => {
                 if (Array.isArray(c.participants)) {
                     c.participants.forEach((u) => {
                         if (u && u._id) {
-                            u.online = onlineUsers.has(u._id.toString())
+                            u.online = isUserOnline(u) || onlineUsers.has(u._id.toString())
                         }
                     })
                 }
@@ -425,7 +463,7 @@ const onUserGetConversations = (socket) => {
             if (Array.isArray(c.participants)) {
                 c.participants.forEach((u) => {
                     if (u && u._id) {
-                        u.online = onlineUsers.has(u._id.toString())
+                        u.online = isUserOnline(u) || onlineUsers.has(u._id.toString())
                     }
                 })
             }
@@ -469,10 +507,17 @@ const onConversationMsgRead = async (socket) => {
     const allowAdmin = !!socket.user.isAdmin;
 
     socket.on("conversation_msg_read", async (data) => {
-        let { conversationId } = data
+        let { conversationId, senderId } = data
 
         try {
             if (allowAdmin) {
+                const targetSenderId = senderId || userId;
+                const senderUser = await User.findById(targetSenderId);
+                if (!senderUser || !senderUser.vir) {
+                    return;
+                }
+                await msgService.markConMsgReadByConIdAndUid(conversationId, targetSenderId);
+                emitUserConversationEvent('conversation_msg_read_res', conversationId, { ok: true, data: { conversationId, uid: targetSenderId } }, targetSenderId)
                 return;
             }
             let msgList = await msgService.markConMsgReadByConIdAndUid(conversationId, userId);
@@ -505,6 +550,20 @@ export const closeUser = (userId) => {
         })
         onlineUsers.delete(userId)
     }
+}
+
+export const setVirtualUserOnlineState = async (uid, online) => {
+    const user = await User.findOne({ uid: Number(uid), vir: true });
+    if (!user) {
+        throw new Error("chat.error.userNotExist");
+    }
+
+    user.online = !!online;
+    user.lastSeen = new Date();
+    await user.save();
+
+    await emitUserOnlineStateToConversations(user._id, !!online);
+    return user;
 }
 
 
