@@ -1,4 +1,4 @@
-﻿import { Message, Conversation, User } from "../models/index.js";
+import { Message, Conversation, User } from "../models/index.js";
 
 /**
  * 通过用户ID获取参与的会话列表
@@ -33,7 +33,7 @@ const getUserConversationList = async (userId) => {
         });
 
         // 转换为普通对象并添加未读信息
-        const conversationObj = conversation.toObject();
+        const conversationObj = sanitizeConversation(conversation, false);
         conversationObj.hasUnread = !!hasUnread;
         conversationObj.unreadCount = unreadCount;
 
@@ -83,7 +83,7 @@ const getVirConversationList = async (page = 1, limit = 20) => {
         });
 
     const rows = conversations.map(conversation => {
-        const conversationObj = conversation.toObject();
+        const conversationObj = sanitizeConversation(conversation, true);
         conversationObj.virUsers = (conversationObj.participants || []).filter(item => item.vir);
         conversationObj.customerUsers = (conversationObj.participants || []).filter(item => !item.vir);
         return conversationObj;
@@ -265,7 +265,7 @@ const getConversationMessages = async (conversationId, page = 1, limit = 20, use
         .populate('senderId', 'username');
 
     return {
-        messages,
+        messages: messages.map(item => sanitizeMessage(item, allowAdmin)),
         pagination: {
             currentPage: page,
             totalPages: Math.ceil(totalMessages / limit),
@@ -299,12 +299,13 @@ const getLastMessageInConversation = async (conversationId, userId, allowAdmin =
         }
     }
 
-    return await Message.findOne({
+    const lastMessage = await Message.findOne({
         conversationId,
         deleted: false
     })
         .sort({ createdAt: -1 })
         .populate('senderId', 'username avatar');
+    return sanitizeMessage(lastMessage, allowAdmin);
 };
 
 /**
@@ -536,7 +537,7 @@ const getUnReadMessages = async (conversationId, userId) => {
         await message.save();
     }
 
-    return unreadMessages;
+    return unreadMessages.map(item => sanitizeMessage(item, false));
 }
 // 通过最晚消息时间, 获取N条以前的消息
 const getMsgByTime = async (conversationId, userId, time, msgNum = 20, allowAdmin = false) => {
@@ -571,7 +572,7 @@ const getMsgByTime = async (conversationId, userId, time, msgNum = 20, allowAdmi
             await message.save();
         }
     }
-    return messages
+    return messages.map(item => sanitizeMessage(item, allowAdmin))
 }
 
 const markConMsgReadByConIdAndUid = async (conversationId, userId) => {
@@ -608,3 +609,25 @@ export default {
 
 
 
+const sanitizeMessage = (message, allowAdmin = false) => {
+    if (!message) {
+        return message;
+    }
+    const plain = typeof message.toObject === 'function' ? message.toObject() : JSON.parse(JSON.stringify(message));
+    if (!allowAdmin) {
+        delete plain.translationZhCn;
+    }
+    return plain;
+};
+
+
+const sanitizeConversation = (conversation, allowAdmin = false) => {
+    if (!conversation) {
+        return conversation;
+    }
+    const plain = typeof conversation.toObject === 'function' ? conversation.toObject() : JSON.parse(JSON.stringify(conversation));
+    if (plain.lastMessage) {
+        plain.lastMessage = sanitizeMessage(plain.lastMessage, allowAdmin);
+    }
+    return plain;
+};

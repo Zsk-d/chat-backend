@@ -14,6 +14,17 @@ const adminUsers = new Map();
 const adminProfiles = new Map(); // userId -> { userId, nickname, mail }
 const adminActiveConversationByUser = new Map(); // userId -> conversationId
 
+const sanitizeMessageForAudience = (message, allowAdmin = false) => {
+    if (!message) {
+        return message;
+    }
+    const plain = typeof message.toObject === "function" ? message.toObject() : JSON.parse(JSON.stringify(message));
+    if (!allowAdmin) {
+        delete plain.translationZhCn;
+    }
+    return plain;
+};
+
 // 每个用户允许的最大 WebSocket 连接数，可通过环境变量配置
 const MAX_CONNECTIONS_PER_USER = parseInt(process.env.MAX_CONNECTIONS_PER_USER) || 3;
 
@@ -280,6 +291,17 @@ const emitAdminConversationMessage = async (message, conversationId) => {
     })
 }
 
+const emitAdminMessageTranslation = async (payload) => {
+    const adminSocketIds = new Set()
+    adminUsers.forEach(socketIds => {
+        socketIds.forEach(socketId => adminSocketIds.add(socketId))
+    })
+
+    adminSocketIds.forEach(socketId => {
+        io.to(socketId).emit("message_translate_res", { ok: true, data: payload })
+    })
+}
+
 const emitAdminConversationEvent = async (eventName, data) => {
     const adminSocketIds = new Set()
     adminUsers.forEach(socketIds => {
@@ -364,6 +386,8 @@ const syncAdminConversationFocus = async (userId, conversationId, adminProfilePa
 const emitConversationMessage = async (message, conversationId) => {
     // 更新会话最后消息
     let conversation = await Conversation.findById(conversationId);
+    const userMessage = sanitizeMessageForAudience(message, false);
+    const adminMessage = sanitizeMessageForAudience(message, true);
 
     // 获取会话中所有用户ID, 发送给接收者（如果在线）
     const receiverIds = conversation.participants.filter(id => !message.senderId || id.toString() !== message.senderId._id.toString());
@@ -372,7 +396,7 @@ const emitConversationMessage = async (message, conversationId) => {
             let receiverSockets = onlineUsers.get(receiverUserId.toString());
             if (receiverSockets) {
                 receiverSockets.forEach(socketId => {
-                    io.to(socketId).emit("receive_message", { ok: true, data: { message, conversationId } })
+                    io.to(socketId).emit("receive_message", { ok: true, data: { message: userMessage, conversationId } })
                 })
                 // 设置用户已读
                 msgService.markMessageAsRead(message._id, receiverUserId)
@@ -383,7 +407,7 @@ const emitConversationMessage = async (message, conversationId) => {
     // 只要是包含虚拟用户的会话，管理端也同步收到一份消息
     const virUsers = await User.exists({ _id: { $in: conversation.participants }, vir: true })
     if (virUsers) {
-        await emitAdminConversationMessage(message, conversationId)
+        await emitAdminConversationMessage(adminMessage, conversationId)
     }
 }
 /**
@@ -474,8 +498,9 @@ const onUserSendMessage = (socket) => {
             // 同步给发送者的所有连接（更新自己界面）
             let senderSockets = onlineUsers.get(userId);
             if (senderSockets) {
+                const senderMessage = sanitizeMessageForAudience(message, false)
                 senderSockets.forEach(sid => {
-                    io.to(sid).emit("message_sent", { ok: true, data: { message, conversationId } });
+                    io.to(sid).emit("message_sent", { ok: true, data: { message: senderMessage, conversationId } });
                 })
             }
         } catch (err) {
@@ -515,7 +540,7 @@ const onUserSendMessage = (socket) => {
             const message = await msgService.sendMessageToConversation(conversationId, senderId, { content, type })
             await emitConversationMessage(message, conversationId)
 
-            socket.emit("admin_send_message_res", { ok: true, data: { message, conversationId } })
+            socket.emit("admin_send_message_res", { ok: true, data: { message: sanitizeMessageForAudience(message, true), conversationId } })
         } catch (err) {
             socket.emit("admin_send_message_res", { ok: false, msg: err.message || "chat.error.send_message" });
         }
@@ -683,6 +708,8 @@ export const setVirtualUserOnlineState = async (uid, online) => {
     await emitUserOnlineStateToConversations(user._id, !!online);
     return user;
 }
+
+export { emitAdminMessageTranslation };
 
 
 

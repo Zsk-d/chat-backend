@@ -1,7 +1,7 @@
 import User from "../models/user.model.js";
 import Conversation from "../models/conversation.model.js";
 import Message from "../models/message.model.js";
-import { getOnlineUserIds, setVirtualUserOnlineState } from "../socket/chat.socket.js";
+import { emitAdminMessageTranslation, getOnlineUserIds, setVirtualUserOnlineState } from "../socket/chat.socket.js";
 
 /**
  * POST /admin/chat/online
@@ -166,6 +166,7 @@ export const searchMessages = async (req, res) => {
                 senderUid: sender ? sender.uid : null,
                 senderName: sender ? sender.username : null,
                 content: m.content,
+                translationZhCn: m.translationZhCn || '',
                 type: m.type,
                 status: m.status,
                 createdAt: m.createdAt
@@ -175,6 +176,45 @@ export const searchMessages = async (req, res) => {
         res.json({ ok: true, data: { total, rows } });
     } catch (err) {
         console.error("searchMessages error:", err);
+        res.status(500).json({ ok: false, msg: err.message });
+    }
+};
+
+/**
+ * POST /admin/chat/message/translate
+ * 保存消息中文翻译并广播给管理员
+ */
+export const translateMessage = async (req, res) => {
+    try {
+        const { conversationId, messageId, translationZhCn } = req.body;
+        if (!conversationId || !messageId) {
+            return res.status(400).json({ ok: false, msg: "conversationId and messageId are required" });
+        }
+        const translation = String(translationZhCn || "").trim();
+        if (!translation) {
+            return res.status(400).json({ ok: false, msg: "translationZhCn is required" });
+        }
+
+        const message = await Message.findById(messageId);
+        if (!message) {
+            return res.status(404).json({ ok: false, msg: "message not found" });
+        }
+        if (message.conversationId?.toString() !== conversationId.toString()) {
+            return res.status(400).json({ ok: false, msg: "conversation mismatch" });
+        }
+
+        message.translationZhCn = translation;
+        await message.save();
+
+        await emitAdminMessageTranslation({
+            conversationId,
+            messageId: message._id.toString(),
+            translationZhCn: translation
+        });
+
+        res.json({ ok: true, data: { conversationId, messageId: message._id.toString(), translationZhCn: translation } });
+    } catch (err) {
+        console.error("translateMessage error:", err);
         res.status(500).json({ ok: false, msg: err.message });
     }
 };

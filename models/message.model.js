@@ -15,6 +15,7 @@ const messageSchema = new mongoose.Schema({
   senderId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   type: { type: String, enum: ["text", "image", "file", "system"], default: "text" },
   content: String,
+  translationZhCn: { type: String, default: '' },
   status: { type: String, enum: ["sent", "delivered", "read"], default: "sent" },
   readBy: {
     type: Map,
